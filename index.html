@@ -1,0 +1,605 @@
+<html>
+	<head>
+		<script src="pixi.js"></script>
+		<script src="utils.js"></script>
+		<script src="objectpool.js"></script>
+	</head>
+
+	<body>
+		<script>			
+		
+		var spriteBatch = null;
+		var renderer = null;
+		var sprite = null;
+		var states = {
+			GAMEOVER: 1,
+			PLAYERDIED: 2,
+			GAMEON: 3,
+			MENU: 4
+		}		
+
+		var game = {
+			state: states.GAMEON,
+			spriteBatchWidth: 640,
+			spriteBatchHeight: 480,
+			speed: null,
+			monsterBulletSpeed: 50,
+			bulletSpeed: 50,
+			level: 1,
+			fontStyle: { font: '24px Silkscreen' },
+			lastMonsterUpdate: null,
+			lastPlayerUpdate: null,
+			lastBulletUpdate: null,
+			textures: {},
+			objectPools: {},
+			monsterTypes: [
+				{
+					collisionRectangle: new PIXI.Rectangle(0, 0, 48, 28),
+					score: 10
+				},
+				{
+					collisionRectangle: new PIXI.Rectangle(6, 4, 36, 24),
+					score: 20
+				},
+				{
+					collisionRectangle: new PIXI.Rectangle(8, 2, 32, 22),
+					score: 30
+				}
+			],
+			texts: {
+				score: null,
+				lives: null,
+				menu: null
+			},
+			player: {
+				lives: 3,
+				score: 0,
+				speed: 50,
+				direction: 0,
+				sprite: null,
+			},
+			playfield: {
+				monsters: [],
+				monsterBullets: [],
+				direction: 1
+			}
+		}
+		
+		function init() {
+			stage = new PIXI.Stage();
+			spriteBatch = new PIXI.SpriteBatch();
+			stage.addChild(spriteBatch);
+			renderer = PIXI.autoDetectRenderer(game.spriteBatchWidth, game.spriteBatchHeight, null);
+			document.body.appendChild(renderer.view);
+		
+		    var loader = new PIXI.AssetLoader(["invaders.png", "bg.png", "silk.fnt"]);
+			
+			loader.onComplete = function () {		
+				spriteBatch.addChild(PIXI.Sprite.fromImage('bg.png'));
+				
+				baseTexture = PIXI.BaseTexture.fromImage("invaders.png");
+
+				game.monsterCount = 3;
+				game.frameCount = 2;
+						
+				game.textures.monsters = [];
+				for (i = 0; i < game.monsterCount; i++) {
+					var frames = [];
+					
+					for (j = 0; j < game.frameCount; j++) {
+						var rect = new PIXI.Rectangle(((i * game.frameCount) + j) * 48, 0, 48, 32);
+						frames.push(new PIXI.Texture(baseTexture, rect))
+					}
+												
+					game.textures.monsters.push(frames);
+				}
+
+				game.textures.player = new PIXI.Texture(baseTexture, new PIXI.Rectangle(6 * 48, 0, 48, 32));
+				game.textures.deadPlayer = new PIXI.Texture(baseTexture, new PIXI.Rectangle(7 * 48, 0, 48, 32));
+				game.textures.deadMonster = new PIXI.Texture(baseTexture, new PIXI.Rectangle(8 * 48, 0, 48, 32));
+
+				var graphics = new PIXI.Graphics();
+				graphics.beginFill(0xFFFFFF);
+				graphics.drawRect(0, 0, 4, 16);
+				game.textures.bullet = graphics.generateTexture();
+							
+				game.objectPools.bullets = new ObjectPool(5, function () {
+					return new PIXI.Sprite(game.textures.bullet);
+				});
+				game.objectPools.deadMonsters = new ObjectPool(2, function () {
+					return new PIXI.Sprite(game.textures.deadMonster);
+				});
+						
+				menu();
+			}
+		
+			loader.load();
+		}
+
+		window.addEventListener("keydown", function (key) {		
+				if (game.state == states.GAMEON) {
+					if (key.keyCode == 37)
+						game.player.direction = -1;
+					else if (key.keyCode == 39)
+						game.player.direction = 1;
+					else if (key.keyCode == 83)
+						tryShoot();				
+				}
+				else if (game.state == states.MENU) {
+					if (key.keyCode == 83)
+						startGame();
+				}
+			}, false
+		);
+		
+		window.addEventListener("keyup", function (key) {
+				if (key.keyCode == 37 && game.player.direction == -1)
+					game.player.direction = 0;
+				else if (key.keyCode == 39 && game.player.direction == 1)
+					game.player.direction = 0;
+			}, false
+		);
+		
+		function refreshTexts() {
+			if (!game.texts.score) {
+				game.texts.score = new PIXI.BitmapText("Score: " + game.player.score, game.fontStyle);
+				game.texts.score.position.x = 16;
+				game.texts.score.position.y = 4;
+				stage.addChild(game.texts.score);
+			} else {
+				game.texts.score.setText("Score: " + game.player.score);
+			}
+			
+			if (!game.texts.lives) {
+				game.texts.lives = new PIXI.BitmapText("Lives: " + game.player.lives, game.fontStyle);
+				game.texts.lives.position.x = 500;
+				game.texts.lives.position.y = 4;
+				stage.addChild(game.texts.lives);
+			} else {
+				game.texts.lives.setText("Lives: " + game.player.lives);
+			}
+		}
+		
+		function getX(e) { return e.x; } 
+		function getY(e) { return e.y; } 
+		
+		function refreshMaxMinMonsters() {
+			var minX = game.playfield.monsters.map(getX).min();
+			var maxX = game.playfield.monsters.map(getX).max();
+			var minY = game.playfield.monsters.map(getY).min();
+			var maxY = game.playfield.monsters.map(getY).max();
+			game.playfield.leftMonster = game.playfield.monsters.filter(function (e) { return e.x == minX; })[0];
+			game.playfield.rightMonster = game.playfield.monsters.filter(function (e) { return e.x == maxX; })[0];
+			game.playfield.topMonster = game.playfield.monsters.filter(function (e) { return e.y == minY; })[0];
+			game.playfield.bottomMonster = game.playfield.monsters.filter(function (e) { return e.y == maxY; })[0];
+		}
+		
+		function killPlayer() {
+			game.state = states.PLAYERDIED;
+			destroyPlayerAndCreateDeadPlayer();
+			game.player.lives--;
+			refreshTexts();
+		}
+		
+		function clearPlayfield() {
+			game.playfield.monsters.forEach(function (monster) {
+				spriteBatch.removeChild(monster);
+			});
+			game.playfield.monsters.length = 0;
+			
+			game.playfield.monsterBullets.forEach(function (monsterBullet) {
+				spriteBatch.removeChild(monsterBullet);
+				monsterBullet.isFree = true;
+			})
+			game.playfield.monsterBullets.length = 0
+			
+			if (game.player.deadSprite) {
+				spriteBatch.removeChild(game.player.deadSprite);
+				game.player.deadSprite = null;
+			}
+			
+			if (game.playfield.bullet) {
+				spriteBatch.removeChild(game.playfield.bullet);
+				game.playfield.bullet.isFree = true;
+				game.playfield.bullet = null;
+			}
+		}
+		
+		function destroyMenuText() {
+			stage.removeChild(game.texts.menu);
+		}
+		
+		function menu() {
+			game.state = states.MENU;
+			
+			game.texts.menu = new PIXI.DisplayObjectContainer ()
+			
+			var titleText = new PIXI.BitmapText('Invaders from space', game.fontStyle);
+			titleText.position.x = 148;
+			titleText.position.y = 185;
+			game.texts.menu.addChild(titleText);
+			
+			var startText = new PIXI.BitmapText("Press S to start new game", game.fontStyle);
+			startText.position.x = 100;
+			startText.position.y = 210;
+			game.texts.menu.addChild(startText);
+			
+			stage.addChild(game.texts.menu);
+		}
+		
+		function gameOver () {
+			game.state = states.GAMEOVER;
+			
+			game.player.lives = 0;
+			refreshTexts();
+			var gameOverText = new PIXI.BitmapText("Game over", game.fontStyle);
+			gameOverText.position.x = 240;
+			gameOverText.position.y = 210;
+			stage.addChild(gameOverText);
+			setTimeout(function () {
+				stage.removeChild(gameOverText);
+				clearPlayfield();
+				menu();
+			}, 4000);
+		}
+		
+		function initGameStats() {
+			game.player.score = 0;
+			game.player.lives = 3;
+			game.level = 1;
+		}
+		
+		function startGame() {
+			initGameStats();
+			destroyMenuText();
+			clearPlayfield();
+			createPlayer();			
+			refreshTexts();
+			
+			startLevel(game.level);
+			
+			game.state = states.GAMEON;
+		}
+		
+		function initSpeed() {
+			game.speed = 1000;
+			game.playfield.direction = 1;
+			
+		}
+		
+		function startLevel() {
+			var levelNumber = game.level;
+			
+			initSpeed();
+
+			var startLevelText = new PIXI.BitmapText("Level " + levelNumber, game.fontStyle); 
+			startLevelText.position.x = 265;
+			startLevelText.position.y = 210;
+			stage.addChild(startLevelText);
+			
+			setTimeout(function () {
+				stage.removeChild(startLevelText);
+				setTimeout(function () {
+					game.lastMonsterUpdate = Date.now();
+					createMonsters();
+					refreshMaxMinMonsters();
+					game.playfield.bottomMonsters = game.playfield.monsters.slice(4 * 8, 5 * 8);
+				}, 500)
+			}, 2000)
+		}
+		
+		function isLevelCompleted() {
+			return game.playfield.monsters.length == 0;
+		}
+		
+		function levelCompleted() {
+			game.level++;
+			setTimeout(startLevel, 2000)
+		}
+		
+		function createAndDestroyDeadMonster(monster) {
+			var deadMonster = game.objectPools.deadMonsters.getFirstFree();
+			deadMonster.x = monster.x;
+			deadMonster.y = monster.y;
+			spriteBatch.addChild(deadMonster);
+			setTimeout(function () {
+				spriteBatch.removeChild(deadMonster);
+				deadMonster.isFree = true;
+			}, 100);
+		}
+		
+		function createMonsters() {
+			// Add monsters to playfield
+			for (i = 0; i < 5; i++) {
+				for (j = 0; j < 8; j++) {
+					var monsterTypeId = (game.monsterCount - 1) - Math.floor((i + 1) / 2);
+					var movieClip = new PIXI.MovieClip(game.textures.monsters[monsterTypeId]);
+					
+					movieClip.collisionRectangle = game.monsterTypes[monsterTypeId].collisionRectangle;
+					movieClip.monsterType = game.monsterTypes[monsterTypeId];
+					
+					movieClip.y = (i * 40) + 38;
+					movieClip.x = (j * 64) + 72;
+					game.playfield.monsters.push(movieClip);
+					spriteBatch.addChild(movieClip);
+				}
+			};
+		}
+		
+		function createPlayer() {
+			game.player.sprite = new PIXI.Sprite(game.textures.player);
+			game.player.sprite.x = (game.spriteBatchWidth - game.player.sprite.width) / 2;
+			game.player.sprite.y = game.spriteBatchHeight - game.player.sprite.height;
+			spriteBatch.addChild(game.player.sprite);
+		}
+		
+		function tryCreatePlayer() {
+			if (game.player.lives > 0) {
+				setTimeout(function () {
+					if (game.player.deadSprite) {
+						spriteBatch.removeChild(game.player.deadSprite)
+						game.player.deadSprite = null;
+					}
+					createPlayer();
+					
+					game.state = states.GAMEON;
+				}, 2500)
+			} else {
+				gameOver();
+			}
+		}
+		
+		function destroyPlayerAndCreateDeadPlayer () {
+			spriteBatch.removeChild(game.player.sprite);
+						
+			game.player.deadSprite = new PIXI.Sprite(game.textures.deadPlayer);
+			game.player.deadSprite.x = game.player.sprite.x;
+			game.player.deadSprite.y = game.player.sprite.y;
+			spriteBatch.addChild(game.player.deadSprite);
+			
+			game.player.sprite = null;
+		}
+		
+		function destroyMonsterBullet(monsterBullet) {
+			spriteBatch.removeChild(monsterBullet);
+			monsterBullet.isFree = true;
+			game.playfield.monsterBullets.splice(game.playfield.monsterBullets.indexOf(monsterBullet), 1);
+		}
+		
+		function destroyBullet() {
+			spriteBatch.removeChild(game.playfield.bullet);
+			game.playfield.bullet.isFree = true;
+			game.playfield.bullet = null;
+		}
+		
+		function destroyMonster(monster) {
+			game.player.score += monster.monsterType.score;			
+			refreshTexts();
+		
+			if (game.playfield.bottomMonsters.indexOf(monster) != -1) {			
+				var filtered = game.playfield.monsters
+					.filter(function (e) { return e.x == monster.x })
+					.sort(function (a, b) { return a.y - b.y });
+				
+				if (filtered.length >= 2) {
+					game.playfield.bottomMonsters.push(filtered[filtered.length - 2]);
+				}
+				
+				game.playfield.bottomMonsters.splice(game.playfield.bottomMonsters.indexOf(monster), 1);
+			}
+		
+			spriteBatch.removeChild(monster);
+			game.playfield.monsters.splice(game.playfield.monsters.indexOf(monster), 1);
+			
+			refreshMaxMinMonsters();
+		}
+		
+		var monsterCollisionRectangle = {};
+		
+		function checkCollisions() {
+			if (game.playfield.bullet && game.playfield.monsters.length > 0 &&
+				game.playfield.bullet.y <= game.playfield.bottomMonster.y + game.playfield.bottomMonster.height &&
+				game.playfield.bullet.y + game.playfield.bullet.height >= game.playfield.topMonster.y) {
+				for (i = 0; i < game.playfield.monsters.length; i++) {
+					var monster = game.playfield.monsters[i];					
+					
+					monsterCollisionRectangle.x = monster.collisionRectangle.x + monster.x;
+					monsterCollisionRectangle.y = monster.collisionRectangle.y + monster.y;
+					monsterCollisionRectangle.width = monster.collisionRectangle.width;
+					monsterCollisionRectangle.height = monster.collisionRectangle.height;
+					
+					if (isIntersecting(game.playfield.bullet, monsterCollisionRectangle)) {
+						destroyBullet();
+						destroyMonster(monster);
+						createAndDestroyDeadMonster(monster);
+						increaseSpeed();
+						
+						if (game.state == states.GAMEON && isLevelCompleted())
+							levelCompleted();
+						
+						break;
+					}
+				}
+			}
+			
+			if (game.playfield.monsterBullets.length > 0 && game.player.sprite) {
+				for (i = 0; i < game.playfield.monsterBullets.length; i++) {
+					var monsterBullet = game.playfield.monsterBullets[i];
+					if (monsterBullet.y + monsterBullet.height >= game.player.sprite.y && isIntersecting(monsterBullet, game.player.sprite)) {
+						destroyMonsterBullet(monsterBullet);
+						killPlayer();
+						tryCreatePlayer();
+						
+						break;
+					}
+				}
+			}
+		}
+
+		function updateMonsterBullets() {	
+			for (i = 0; i < game.playfield.monsterBullets.length; i++) {
+				var index = game.playfield.monsterBullets.length - 1 - i ;
+				var monsterBullet = game.playfield.monsterBullets[index];
+				
+				monsterBullet.y += 10;
+				if (monsterBullet.y + monsterBullet.height > game.spriteBatchHeight) {
+					spriteBatch.removeChild(monsterBullet);
+					monsterBullet.isFree = true;
+					game.playfield.monsterBullets.splice(index, 1);
+				}
+			}
+		}
+		
+		function tryUpdateMonsterBullets(now) {		
+			if (game.playfield.monsterBullets.length > 0 && game.lastMonsterBulletUpdate && game.lastMonsterBulletUpdate < now - game.monsterBulletSpeed) {
+				updateMonsterBullets();
+				
+				game.lastMonsterBulletUpdate = now;
+			}
+			else if (!game.lastMonsterBulletUpdate) {
+				game.lastMonsterBulletUpdate = now;
+			}
+		}
+		
+		function monsterShoot(monster) {
+			var monsterBullet = game.objectPools.bullets.getFirstFree();
+			monsterBullet.x = monster.x + (monster.width / 2) - (monsterBullet.width / 2);
+			monsterBullet.y = monster.y + monster.height + 8;			
+			
+			game.playfield.monsterBullets.push(monsterBullet)
+			spriteBatch.addChild(monsterBullet);
+		}
+		
+		function randomizeMonsterShoot() {		
+			if (game.playfield.bottomMonsters.length > 0 && getRandomInt(1, 100) >= 85) {
+				var index = getRandomInt(0, game.playfield.bottomMonsters.length - 1);
+			
+				monsterShoot(game.playfield.bottomMonsters[index]);
+			}
+		}
+		
+		function shoot() {
+			game.playfield.bullet = game.objectPools.bullets.getFirstFree();
+			game.playfield.bullet.x = game.player.sprite.x + (game.player.sprite.width / 2) - (game.playfield.bullet.width / 2);
+			game.playfield.bullet.y = game.player.sprite.y - game.player.sprite.height + 8;
+			spriteBatch.addChild(game.playfield.bullet);
+		}
+		
+		function tryShoot() {
+			if (!game.playfield.bullet)
+				shoot();
+		}
+		
+		function updateBullet() {
+			game.playfield.bullet.y -= 12;
+			if (game.playfield.bullet.y + game.playfield.bullet.height < 0) {
+				destroyBullet()
+			}
+		}
+		
+		function tryUpdateBullet(now) {		
+			if (game.playfield.bullet && game.lastBulletUpdate && game.lastBulletUpdate < now - game.bulletSpeed) {
+				updateBullet();
+				
+				game.lastBulletUpdate = now;
+			}
+			else if (!game.lastBulletUpdate) {
+				game.lastBulletUpdate = now;
+			}
+		}
+		
+		function updatePlayer() {
+			game.player.sprite.x += (game.player.direction * 8);
+			
+			if (game.player.sprite.x < 0)
+				game.player.sprite.x = 0;
+			else if (game.player.sprite.x > game.spriteBatchWidth - game.player.sprite.width)
+				game.player.sprite.x = game.spriteBatchWidth - game.player.sprite.width;
+		}
+		
+		function tryUpdatePlayer(now) {		
+			if (game.player.sprite && game.player.direction && game.lastPlayerUpdate && game.lastPlayerUpdate < now - game.player.speed) {
+				updatePlayer();
+				
+				game.lastPlayerUpdate = now;
+			}
+			else if (!game.lastPlayerUpdate) {
+				game.lastPlayerUpdate = now;
+			}
+		}
+		
+		function updateMonsters() {
+			if (game.state != states.GAMEON) {
+				for (var i = 0, len = game.playfield.monsters.length; i < len; i++) {
+					game.playfield.monsters[i].gotoAndStop(game.playfield.monsters[i].currentFrame + 1);
+				};
+				game.player.direction = 0;
+			}
+			else {
+				if (game.directionChanged) {
+					for (var i = 0, len = game.playfield.monsters.length; i < len; i++) {
+						game.playfield.monsters[i].gotoAndStop(game.playfield.monsters[i].currentFrame + 1);
+						game.playfield.monsters[i].y += 16; 
+					};
+					game.directionChanged = false;
+						
+					if (game.playfield.bottomMonster.y + game.playfield.bottomMonster.height > 430) {
+						destroyPlayerAndCreateDeadPlayer();
+						gameOver();
+					};
+					
+				}
+				else {
+					for (var i = 0, len = game.playfield.monsters.length; i < len; i++) {
+						game.playfield.monsters[i].gotoAndStop(game.playfield.monsters[i].currentFrame + 1);
+						game.playfield.monsters[i].x += (16 * game.playfield.direction);
+					};
+				
+					if (game.playfield.rightMonster.x + 48 >= (game.spriteBatchWidth - 16)|| game.playfield.leftMonster.x <= 16)
+					{
+						game.playfield.direction *= -1;
+						game.directionChanged = true;
+					}
+					else {
+						game.directionChanged = false;
+					}			
+				}
+				
+				randomizeMonsterShoot();
+			}
+		}
+		
+		function increaseSpeed() {
+			game.speed *= 0.93;
+		}
+		
+		function tryUpdateMonsters(now) {			
+			if (game.playfield.monsters.length > 0) {
+				if (game.lastMonsterUpdate && game.lastMonsterUpdate < now - game.speed) {
+					updateMonsters();
+					
+					game.lastMonsterUpdate = now;
+				}			
+			}
+		}
+		
+		function update() {
+			var now = Date.now();
+		
+			tryUpdateMonsters(now);
+			tryUpdatePlayer(now);
+			tryUpdateMonsterBullets(now);
+			tryUpdateBullet(now);
+			checkCollisions();
+			
+			renderer.render(stage);
+			requestAnimationFrame(update);
+		}
+		
+		init();
+		requestAnimationFrame(update);
+				
+		</script>
+	</body>
+		
+</html>
