@@ -66,9 +66,13 @@
 		}
 		
 		function init() {
-			stage = new PIXI.Stage();
+			stage = new PIXI.Stage(0xFFFFFF, true);
 			spriteBatch = new PIXI.SpriteBatch();
 			stage.addChild(spriteBatch);
+			stage.click = function () {
+				if (game.state == states.MENU)
+					startGame();
+			};
 			renderer = PIXI.autoDetectRenderer(game.spriteBatchWidth, game.spriteBatchHeight, null);
 			document.body.appendChild(renderer.view);
 		
