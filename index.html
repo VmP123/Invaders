@@ -69,7 +69,7 @@
 			stage = new PIXI.Stage(0xFFFFFF, true);
 			spriteBatch = new PIXI.SpriteBatch();
 			stage.addChild(spriteBatch);
-			stage.tap = function () {
+			stage.click = function () {
 				if (game.state == states.MENU)
 					startGame();
 			};
